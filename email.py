@@ -2,18 +2,21 @@
 title: Email Sending Tool
 author: Karol S. Danisz
 author_url: https://github.com/k-mktr/llm-tool-calling-examples
-buy_me_a_coffee: https://mktr.sbs/coffee
+funding_url: https://mktr.sbs/coffee
 version: 0.1.0
 license: MIT
-description: A tool for preparing and sending emails using SMTP, with user confirmation and HTML support.
+description: A tool for composing and sending emails via SMTP, featuring user confirmation and HTML support.
+Optimized for compatibility with Llama 3.1 8B.
 """
 
 import smtplib
-from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import List, Dict, Any, Callable
 from pydantic import BaseModel, Field
 from datetime import datetime
+from html import unescape
+
 
 class Tools:
     class Valves(BaseModel):
@@ -42,19 +45,6 @@ class Tools:
         self.valves = self.Valves()
         self.prepared_email = None
 
-    def get_user_name_and_email_and_id(self, __user__: dict = {}) -> str:
-        """
-        Get the user name, Email and ID from the user object.
-        """
-        result = ""
-        if "name" in __user__:
-            result += f"User: {__user__['name']}"
-        if "id" in __user__:
-            result += f" (ID: {__user__['id']})"
-        if "email" in __user__:
-            result += f" (Email: {__user__['email']})"
-        return result if result else "User: Unknown"
-
     async def prepare_email(self, subject: str, body: str, recipients: str, 
                             __event_emitter__: Callable[[dict], Any] = None) -> str:
         """
@@ -81,12 +71,11 @@ class Tools:
 
         recipients = recipients.strip("[]").replace("'", "").replace('"', '')
         
-        # Add signature to the body
-        body_with_signature = f"{body}<br><br>{self.valves.EMAIL_SIGNATURE}"
-        
+        # Store body and signature separately
         self.prepared_email = {
             "subject": subject,
-            "body": body_with_signature,
+            "body": body,
+            "signature": self.valves.EMAIL_SIGNATURE,
             "recipients": recipients,
         }
 
@@ -99,11 +88,10 @@ TO: {recipients}
 SUBJECT: {subject}
 BODY: {body}
 
-Signature will be automatically appended.
-
 Present prepared email to the user requesting to review its details and confirm if the user wants to send it to the recipients.
 To send the email, use the 'send_prepared_email' function.
 To discard this email and start over, use the 'discard_prepared_email' function.
+Don't mention the functions to the user. Just ask if they want to send or discard the email.
 """
 
     async def send_prepared_email(self, __event_emitter__: Callable[[dict], Any] = None) -> str:
@@ -137,17 +125,25 @@ To discard this email and start over, use the 'discard_prepared_email' function.
             if __event_emitter__:
                 await __event_emitter__(status_object("Connecting to SMTP server"))
 
+            # Create the email message
             msg = MIMEMultipart('alternative')
             msg['Subject'] = self.prepared_email["subject"]
             msg['From'] = self.valves.FROM_EMAIL
             msg['To'] = self.prepared_email["recipients"]
 
-            # Create both plain text and HTML versions of the message
-            text_part = MIMEText(self.prepared_email["body"].replace('<br>', '\n'), 'plain')
-            html_part = MIMEText(self.prepared_email["body"], 'html')
+            # Create plain text version
+            plain_text = unescape(self.prepared_email['body'])
+            if self.prepared_email['signature']:
+                plain_text += f"\n\n{self.prepared_email['signature']}"
 
-            msg.attach(text_part)
-            msg.attach(html_part)
+            # Create HTML version
+            html_content = self.prepared_email['body']
+            if self.prepared_email['signature']:
+                html_content += f"<br><br>{self.prepared_email['signature']}"
+
+            # Attach parts - attach plain text first, then HTML
+            msg.attach(MIMEText(plain_text, 'plain'))
+            msg.attach(MIMEText(html_content, 'html'))
 
             with smtplib.SMTP_SSL(self.valves.SMTP_SERVER, self.valves.SMTP_PORT) as server:
                 server.login(self.valves.FROM_EMAIL, self.valves.PASSWORD)
@@ -155,15 +151,19 @@ To discard this email and start over, use the 'discard_prepared_email' function.
                 if __event_emitter__:
                     await __event_emitter__(status_object("Sending email"))
                 
-                server.sendmail(self.valves.FROM_EMAIL, [self.prepared_email["recipients"]], msg.as_string())
+                server.sendmail(self.valves.FROM_EMAIL, self.prepared_email["recipients"].split(','), msg.as_string())
             
-            current_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
             
             if __event_emitter__:
                 await __event_emitter__(status_object(f"Email sent successfully at {current_time}", status="complete", done=True))
             
             self.prepared_email = None  # Clear the prepared email after sending
-            return f"Message sent successfully at {current_time}."
+            return f"""
+            Message has been sent successfully.
+            Confirm to the user that the email has been sent and thank them for using your service.
+            Don't suggest any further actions to the user.
+            """
         except Exception as e:
             if __event_emitter__:
                 await __event_emitter__(status_object(f"Error: {str(e)}", status="error", done=True))
@@ -184,4 +184,8 @@ To discard this email and start over, use the 'discard_prepared_email' function.
         if __event_emitter__:
             await __event_emitter__({"type": "status", "data": {"status": "complete", "description": "Prepared email discarded", "done": True}})
 
-        return "The prepared email has been discarded. You can prepare a new email using the 'prepare_email' function."
+        return """
+        The prepared email has been discarded.
+        You can prepare a new email using the 'prepare_email' function.
+        Don't suggest any actions to the user.
+        """
